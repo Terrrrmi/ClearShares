@@ -11,6 +11,7 @@ jobs:
 
       - name: Crear proyecto Android
         run: |
+          rm -rf app
           mkdir -p app/src/main/java/com/clearshares/app app/src/main/res/xml app/src/main/res/values
 
           cat > settings.gradle.kts <<'EOF'
@@ -27,8 +28,6 @@ jobs:
           }
           EOF
 
-          echo "org.gradle.jvmargs=-Xmx2g" > gradle.properties
-
           cat > app/build.gradle.kts <<'EOF'
           plugins {
               id("com.android.application")
@@ -41,8 +40,8 @@ jobs:
                   applicationId = "com.clearshares.app"
                   minSdk = 24
                   targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 2
+                  versionName = "2.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -90,6 +89,7 @@ jobs:
           <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
               android:accessibilityEventTypes="typeWindowStateChanged"
               android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagIncludeNotImportantViews|flagReportViewIds"
               android:canRetrieveWindowContent="true"
               android:canPerformGestures="true"
               android:packageNames="com.zhiliaoapp.musically,com.ss.android.ugc.trill"
@@ -99,7 +99,7 @@ jobs:
 
           cat > app/src/main/res/values/strings.xml <<'EOF'
           <resources>
-              <string name="service_desc">Solo actúa sobre TikTok y solo cuando pulsas Borrar compartidos. No guarda ni envía datos.</string>
+              <string name="service_desc">Solo actua sobre TikTok y solo cuando pulsas Quitar mis compartidos. No guarda ni envia datos.</string>
           </resources>
           EOF
 
@@ -107,54 +107,85 @@ jobs:
           package com.clearshares.app
 
           import android.app.Activity
+          import android.content.ClipData
+          import android.content.ClipboardManager
           import android.content.Intent
+          import android.net.Uri
           import android.os.Bundle
           import android.provider.Settings
           import android.view.Gravity
           import android.widget.Button
           import android.widget.LinearLayout
+          import android.widget.ScrollView
           import android.widget.TextView
+          import android.widget.Toast
 
           class MainActivity : Activity() {
               private lateinit var status: TextView
 
+              private fun btn(label: String, action: () -> Unit): Button {
+                  val b = Button(this)
+                  b.text = label
+                  b.setOnClickListener { action() }
+                  return b
+              }
+
+              private fun needService(): ShareCleanerService? {
+                  val s = ShareCleanerService.instance
+                  if (s == null) Toast.makeText(this, "Primero activa Clear Shares en Accesibilidad", Toast.LENGTH_LONG).show()
+                  return s
+              }
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  val pad = (24 * resources.displayMetrics.density).toInt()
-                  val root = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      gravity = Gravity.CENTER
-                      setPadding(pad, pad, pad, pad)
-                  }
-                  root.addView(TextView(this).apply { text = "Clear Shares"; textSize = 28f; gravity = Gravity.CENTER })
-                  root.addView(TextView(this).apply {
-                      text = "\nAbre TikTok con tu sesión ya iniciada y borra tus compartidos con un toque. No pide tu contraseña.\n"
-                      gravity = Gravity.CENTER
+                  val pad = (20 * resources.displayMetrics.density).toInt()
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(pad, pad, pad, pad)
+
+                  val title = TextView(this)
+                  title.text = "Clear Shares"
+                  title.textSize = 28f
+                  title.gravity = Gravity.CENTER
+                  root.addView(title)
+
+                  val info = TextView(this)
+                  info.text = "\nQuita tus reposts (compartidos) de TikTok uno por uno de forma automática. No pide contraseña. Inicia sesión en TikTok antes (puedes usar Google dentro de TikTok).\n"
+                  root.addView(info)
+
+                  root.addView(btn("1. Activar accesibilidad") {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                   })
-                  root.addView(Button(this).apply {
-                      text = "1. Activar accesibilidad"
-                      setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                  root.addView(btn("2. Abrir TikTok / iniciar sesión") {
+                      val pkgs = listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
+                      val i = pkgs.firstNotNullOfOrNull { packageManager.getLaunchIntentForPackage(it) }
+                          ?: Intent(Intent.ACTION_VIEW, Uri.parse("https://www.tiktok.com/login"))
+                      startActivity(i)
                   })
-                  root.addView(Button(this).apply {
-                      text = "2. Borrar compartidos"
-                      setOnClickListener {
-                          val s = ShareCleanerService.instance
-                          if (s == null) {
-                              status.text = "Primero activa Clear Shares en Accesibilidad"
-                          } else {
-                              s.start()
-                          }
-                      }
+                  root.addView(btn("3. QUITAR MIS COMPARTIDOS") { needService()?.start(0) })
+                  root.addView(btn("Detener") { ShareCleanerService.stopRequested = true })
+                  root.addView(btn("Diagnóstico (analizar pantalla de TikTok)") { needService()?.start(1) })
+                  root.addView(btn("Copiar registro") {
+                      val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                      cm.setPrimaryClip(ClipData.newPlainText("registro", ShareCleanerService.logText()))
+                      Toast.makeText(this, "Registro copiado", Toast.LENGTH_SHORT).show()
                   })
-                  status = TextView(this).apply { gravity = Gravity.CENTER; setPadding(0, pad, 0, 0) }
+
+                  status = TextView(this)
+                  status.setTextIsSelectable(true)
+                  status.setPadding(0, pad, 0, 0)
                   root.addView(status)
-                  setContentView(root)
-                  ShareCleanerService.listener = { msg -> runOnUiThread { status.text = msg } }
+
+                  val scroll = ScrollView(this)
+                  scroll.addView(root)
+                  setContentView(scroll)
+                  ShareCleanerService.listener = { _ -> runOnUiThread { status.text = ShareCleanerService.logText() } }
               }
 
               override fun onResume() {
                   super.onResume()
-                  status.text = if (ShareCleanerService.instance != null) "Servicio activo ✅" else "Servicio desactivado"
+                  val estado = if (ShareCleanerService.instance != null) "Servicio activo ✅\n" else "Servicio DESACTIVADO ❌ (paso 1)\n"
+                  status.text = estado + ShareCleanerService.logText()
               }
           }
           EOF
@@ -167,96 +198,233 @@ jobs:
           import android.content.Intent
           import android.graphics.Path
           import android.graphics.Rect
+          import android.os.Handler
+          import android.os.Looper
           import android.view.accessibility.AccessibilityEvent
           import android.view.accessibility.AccessibilityNodeInfo
+          import android.widget.Toast
+
+          class StopException : Exception()
 
           class ShareCleanerService : AccessibilityService() {
 
               companion object {
                   @Volatile var instance: ShareCleanerService? = null
                   @Volatile var running = false
+                  @Volatile var stopRequested = false
                   @Volatile var listener: ((String) -> Unit)? = null
+                  private val log = StringBuilder()
+
+                  fun logText(): String = synchronized(log) { log.toString() }
 
                   val TIKTOK = listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
 
-                  // AJUSTA AQUI los textos si tu version o idioma de TikTok es distinto.
-                  val PATH = listOf(
-                      listOf("Perfil", "Profile"),
-                      listOf("Menú", "Menu", "Más opciones", "More options"),
-                      listOf("Ajustes y privacidad", "Configuración y privacidad", "Settings and privacy"),
-                      listOf("Centro de actividades", "Centro de actividad", "Activity center"),
-                      listOf("Compartidos", "Compartido", "Shares", "Shared")
+                  // AJUSTA AQUI los textos si tu TikTok esta en otro idioma o version.
+                  val PROFILE = listOf("Perfil", "Profile")
+                  val REPOST_TAB = listOf("Reposts", "Reposteos", "Reposteados", "Republicaciones", "Videos compartidos", "Reposted", "Repost")
+                  val SHARE = listOf("Compartir", "Share")
+                  val REMOVE = listOf(
+                      "Quitar repost", "Eliminar repost", "Deshacer repost", "Quitar el repost",
+                      "Quitar republicación", "Eliminar republicación", "Remove repost", "Undo repost"
                   )
-                  val SELECT = listOf("Seleccionar", "Select")
-                  val SELECT_ALL = listOf("Seleccionar todo", "Select all")
-                  val DELETE = listOf("Eliminar", "Borrar", "Delete")
+                  val HOME = listOf("Inicio", "Home")
               }
 
-              override fun onServiceConnected() { instance = this; post("Servicio activo ✅") }
+              @Volatile private var thumbsOk = false
+
+              override fun onServiceConnected() { instance = this; post("Servicio activo") }
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
               override fun onInterrupt() {}
               override fun onDestroy() { instance = null; super.onDestroy() }
 
-              private fun post(msg: String) { listener?.invoke(msg) }
+              fun post(msg: String, toast: Boolean = true) {
+                  synchronized(log) {
+                      log.append(msg).append('\n')
+                      if (log.length > 30000) log.delete(0, log.length - 20000)
+                  }
+                  listener?.invoke(msg)
+                  if (toast) {
+                      Handler(Looper.getMainLooper()).post {
+                          Toast.makeText(applicationContext, msg.take(120), Toast.LENGTH_SHORT).show()
+                      }
+                  }
+              }
 
-              fun start() {
+              fun start(mode: Int) {
                   if (running) return
                   running = true
+                  stopRequested = false
                   Thread {
-                      try { flow() } catch (e: Exception) { post("Error: ${e.message}") }
+                      try {
+                          if (mode == 0) flow() else diagnose()
+                      } catch (e: StopException) {
+                          post("Detenido")
+                      } catch (e: Exception) {
+                          post("Error: ${e.message}")
+                      }
                       running = false
                   }.start()
               }
 
-              private fun flow() {
-                  val launch = TIKTOK.firstNotNullOfOrNull { packageManager.getLaunchIntentForPackage(it) }
-                  if (launch == null) { post("TikTok no está instalado"); return }
-                  post("Abriendo TikTok…")
-                  startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                  Thread.sleep(4000)
-
-                  for ((i, labels) in PATH.withIndex()) {
-                      post("Paso ${i + 1}/${PATH.size}: ${labels.first()}")
-                      var ok = clickAny(labels, 6)
-                      if (!ok && i == 1) ok = tapTopRight()
-                      if (!ok) { post("No encontré «${labels.first()}». Ajusta PATH en ShareCleanerService.kt"); return }
-                      Thread.sleep(1800)
+              private fun pause(ms: Long) {
+                  var left = ms
+                  while (left > 0) {
+                      if (stopRequested) throw StopException()
+                      Thread.sleep(100)
+                      left -= 100
                   }
-
-                  post("Seleccionando…")
-                  if (!clickAny(SELECT, 5)) { post("No hay botón Seleccionar (¿ya está vacío?)"); return }
-                  Thread.sleep(1000)
-                  clickAny(SELECT_ALL, 5)
-                  Thread.sleep(800)
-                  if (!clickAny(DELETE, 5)) { post("No encontré Eliminar"); return }
-                  Thread.sleep(1000)
-                  clickAny(DELETE, 3)
-                  post("Listo ✅ Revisa TikTok")
               }
 
-              private fun clickAny(labels: List<String>, retries: Int): Boolean {
-                  for (attempt in 0 until retries) {
+              private fun openTikTok(): Boolean {
+                  val launch = TIKTOK.firstNotNullOfOrNull { packageManager.getLaunchIntentForPackage(it) } ?: return false
+                  startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                  return true
+              }
+
+              private fun diagnose() {
+                  if (!openTikTok()) { post("TikTok no está instalado"); return }
+                  post("Diagnóstico: ve a la pantalla que quieras analizar (tienes 12 s)")
+                  pause(12000)
+                  post("--- pantalla analizada ---\n" + dump(), toast = false)
+                  post("Listo. Vuelve a Clear Shares y pulsa Copiar registro")
+              }
+
+              private fun fail(msg: String) {
+                  post(msg)
+                  post("--- pantalla actual ---\n" + dump(), toast = false)
+                  post("Vuelve a Clear Shares, pulsa Copiar registro y pégalo en el chat")
+              }
+
+              private fun flow() {
+                  thumbsOk = false
+                  if (!openTikTok()) { post("TikTok no está instalado"); return }
+                  post("Abriendo TikTok…")
+                  pause(4000)
+
+                  post("Abriendo tu perfil…", toast = false)
+                  if (!clickAny(PROFILE, 6)) return fail("No encontré la pestaña Perfil")
+                  pause(2500)
+
+                  post("Abriendo la pestaña de reposts…", toast = false)
+                  if (!clickAny(REPOST_TAB, 6)) return fail("No encontré la pestaña de reposts (icono de dos flechas)")
+                  pause(2500)
+
+                  var removed = 0
+                  var skip = 0
+                  var misses = 0
+                  var inViewer = false
+                  val d = resources.displayMetrics
+
+                  while (removed < 2000) {
+                      if (inViewer) { backToGrid(); inViewer = false; pause(800) }
                       val root = rootInActiveWindow
-                      if (root != null && root.packageName?.toString() in TIKTOK) {
+                      if (root == null || !isTikTok(root)) {
+                          misses++
+                          if (misses > 5) return fail("Perdí de vista la pantalla de TikTok")
+                          pause(1000)
+                          continue
+                      }
+                      val items = thumbs(root)
+                      if (items.isNotEmpty()) thumbsOk = true
+                      if (items.isEmpty() && removed == 0 && skip == 0) {
+                          tap(d.widthPixels / 6f, d.heightPixels * 0.62f)
+                      } else if (items.size <= skip) {
+                          post("Terminado ✅ Reposts quitados: $removed")
+                          return
+                      } else {
+                          click(items[skip])
+                      }
+                      inViewer = true
+                      pause(2500)
+
+                      val opened = clickAny(SHARE, 3)
+                      pause(1500)
+                      if (opened && clickAny(REMOVE, 2)) {
+                          removed++
+                          misses = 0
+                          post("Quitados: $removed", toast = (removed == 1 || removed % 10 == 0))
+                          pause(1500)
+                      } else {
+                          skip++
+                          misses++
+                          if (misses >= 6) return fail("No encontré «Quitar repost» en el menú Compartir")
+                      }
+                  }
+                  post("Detenido tras $removed reposts")
+              }
+
+              private fun backToGrid() {
+                  for (i in 0 until 2) {
+                      val r = rootInActiveWindow
+                      if (r != null && onGrid(r)) return
+                      performGlobalAction(GLOBAL_ACTION_BACK)
+                      pause(1000)
+                  }
+              }
+
+              private fun onGrid(r: AccessibilityNodeInfo): Boolean =
+                  if (thumbsOk) thumbs(r).isNotEmpty() else findNode(r, HOME) != null
+
+              private fun isTikTok(root: AccessibilityNodeInfo): Boolean =
+                  (root.packageName?.toString() ?: "") in TIKTOK
+
+              private fun clickAny(labels: List<String>, tries: Int): Boolean {
+                  for (i in 0 until tries) {
+                      val root = rootInActiveWindow
+                      if (root != null && isTikTok(root)) {
                           val node = findNode(root, labels)
                           if (node != null && click(node)) return true
-                          if (attempt >= 2) scrollable(root)?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
                       }
-                      Thread.sleep(1000)
+                      pause(1000)
                   }
                   return false
               }
 
+              private fun collect(n: AccessibilityNodeInfo?, out: MutableList<AccessibilityNodeInfo>) {
+                  if (n == null) return
+                  out.add(n)
+                  for (i in 0 until n.childCount) collect(n.getChild(i), out)
+              }
+
+              private fun rectOf(n: AccessibilityNodeInfo): Rect {
+                  val r = Rect()
+                  n.getBoundsInScreen(r)
+                  return r
+              }
+
+              private fun matches(n: AccessibilityNodeInfo, label: String): Boolean {
+                  val t = n.text?.toString() ?: ""
+                  val c = n.contentDescription?.toString() ?: ""
+                  return t.contains(label, ignoreCase = true) || c.contains(label, ignoreCase = true)
+              }
+
               private fun findNode(root: AccessibilityNodeInfo, labels: List<String>): AccessibilityNodeInfo? {
+                  val all = ArrayList<AccessibilityNodeInfo>()
+                  collect(root, all)
                   for (label in labels) {
-                      val hits = root.findAccessibilityNodeInfosByText(label).orEmpty().filter { it.isVisibleToUser }
+                      val hits = all.filter { it.isVisibleToUser && matches(it, label) }
                       val exact = hits.firstOrNull {
-                          (it.text ?: it.contentDescription)?.toString().equals(label, ignoreCase = true)
+                          label.equals(it.text?.toString(), ignoreCase = true) ||
+                              label.equals(it.contentDescription?.toString(), ignoreCase = true)
                       }
                       val found = exact ?: hits.firstOrNull()
                       if (found != null) return found
                   }
                   return null
+              }
+
+              private fun thumbs(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
+                  val d = resources.displayMetrics
+                  val w = d.widthPixels
+                  val h = d.heightPixels
+                  val all = ArrayList<AccessibilityNodeInfo>()
+                  collect(root, all)
+                  val out = all.filter { n ->
+                      val r = rectOf(n)
+                      n.isClickable && r.width() >= w * 0.22 && r.width() <= w * 0.5 &&
+                          r.height() > r.width() && r.top > h * 0.25
+                  }
+                  return out.sortedWith(compareBy<AccessibilityNodeInfo>({ rectOf(it).top }, { rectOf(it).left }))
               }
 
               private fun click(node: AccessibilityNodeInfo): Boolean {
@@ -265,24 +433,8 @@ jobs:
                       if (cur.isClickable && cur.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
                       cur = cur.parent
                   }
-                  val r = Rect()
-                  node.getBoundsInScreen(r)
+                  val r = rectOf(node)
                   return tap(r.exactCenterX(), r.exactCenterY())
-              }
-
-              private fun scrollable(n: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-                  if (n.isScrollable) return n
-                  for (i in 0 until n.childCount) {
-                      val c = n.getChild(i) ?: continue
-                      val s = scrollable(c)
-                      if (s != null) return s
-                  }
-                  return null
-              }
-
-              private fun tapTopRight(): Boolean {
-                  val d = resources.displayMetrics
-                  return tap(d.widthPixels * 0.93f, d.heightPixels * 0.075f)
               }
 
               private fun tap(x: Float, y: Float): Boolean {
@@ -291,6 +443,25 @@ jobs:
                   val g = GestureDescription.Builder()
                       .addStroke(GestureDescription.StrokeDescription(p, 0, 60)).build()
                   return dispatchGesture(g, null, null)
+              }
+
+              private fun dump(): String {
+                  val root = rootInActiveWindow ?: return "(no pude leer la pantalla)"
+                  val all = ArrayList<AccessibilityNodeInfo>()
+                  collect(root, all)
+                  val sb = StringBuilder("App: ${root.packageName}\n")
+                  var count = 0
+                  for (n in all) {
+                      val t = n.text?.toString() ?: ""
+                      val c = n.contentDescription?.toString() ?: ""
+                      if (t.isBlank() && c.isBlank()) continue
+                      sb.append("• ").append(t.take(60)).append(" | ").append(c.take(60))
+                      if (n.isClickable) sb.append(" [clic]")
+                      sb.append(' ').append(rectOf(n).flattenToString()).append('\n')
+                      count++
+                      if (count >= 70) break
+                  }
+                  return sb.toString()
               }
           }
           EOF
